@@ -1,0 +1,9 @@
+[Unit]
+Description=Classify and label new Gmail messages with an LLM
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/Projects/gmail_labeling
+ExecStart=%h/Projects/gmail_labeling/.venv/bin/python -m gmail_labeler run

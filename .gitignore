@@ -1,0 +1,30 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local API-key file (see .env.example); the example itself is tracked.
+.env
+.env.*
+!.env.example
+
+# Never commit credentials, even though they live in ~/.config by default
+client_secret*.json
+token.json
+config.json
+state.db
+
+# Claude Code per-machine local settings (settings.json can be shared)
+.claude/settings.local.json
+
+# OS cruft
+.DS_Store
+
+# claude superpower docs
+docs

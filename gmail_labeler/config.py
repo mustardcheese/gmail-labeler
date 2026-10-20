@@ -25,7 +25,9 @@ STATE_DB = CONFIG_DIR / "state.db"
 
 DEFAULT_PROVIDER = "openrouter"
 DEFAULT_MODEL = "openai/gpt-oss-120b"
-DEFAULT_QUERY = "in:inbox newer_than:3d"
+# Base filter only: the poller adds the date window itself (from the last
+# complete run), so a date term here would hide mail between runs.
+DEFAULT_QUERY = "in:inbox"
 
 # Categories and their prompts live in prompts/categories.md (parsed by
 # gmail_labeler/prompts.py), not here.
@@ -67,14 +69,20 @@ def clear_api_keys() -> list[str]:
     return removed
 
 
+def clean_api_key(raw: str) -> str:
+    """Drop whitespace and control characters (e.g. an ESC typed into the hidden
+    prompt), which str.strip() keeps and which make the provider reject the key."""
+    return "".join(ch for ch in raw if ch.isprintable() and not ch.isspace())
+
+
 def resolve_api_key(config: dict, provider_name: str, key_env: str) -> str:
     """Resolve the provider's key: env var -> config file -> interactive prompt."""
     config_key = f"{provider_name}_api_key"
-    key = os.environ.get(key_env) or config.get(config_key)
+    key = clean_api_key(os.environ.get(key_env) or config.get(config_key) or "")
     if key:
         return key
     print(f"No API key found for provider {provider_name!r} (env {key_env} or config).")
-    key = getpass.getpass(f"Enter your {provider_name} API key (input hidden): ").strip()
+    key = clean_api_key(getpass.getpass(f"Enter your {provider_name} API key (input hidden): "))
     if not key:
         sys.exit(f"An API key is required for provider {provider_name!r}.")
     if input("Save it to the config file for next time? [Y/n] ").strip().lower() != "n":

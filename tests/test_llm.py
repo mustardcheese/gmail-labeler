@@ -69,6 +69,14 @@ def test_resolve_api_key_precedence():
                                "openrouter", "OPENROUTER_API_KEY") == "sk-config"
 
 
+def test_api_key_control_characters_are_dropped():
+    """A stray keypress at the hidden prompt (e.g. ESC) must not break auth."""
+    assert cfg.clean_api_key("  sk-or-abc\x1b\n") == "sk-or-abc"
+    # Keys already saved with one are cleaned on read, too.
+    assert cfg.resolve_api_key({"openrouter_api_key": "sk-config\x1b"},
+                               "openrouter", "OPENROUTER_API_KEY") == "sk-config"
+
+
 def test_clear_api_keys():
     import json
     import tempfile

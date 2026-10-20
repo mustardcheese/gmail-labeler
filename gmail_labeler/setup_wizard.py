@@ -70,7 +70,7 @@ def _setup_provider(config: dict) -> None:
         print(f"Found {key_env} in the environment; it will be used at runtime.")
         if input("Also save a key to the config file? [y/N] ").strip().lower() != "y":
             return
-    key = getpass.getpass(f"{provider} API key (input hidden): ").strip()
+    key = cfg.clean_api_key(getpass.getpass(f"{provider} API key (input hidden): "))
     if not key:
         sys.exit(f"An API key is required for provider {provider!r}.")
     print("Validating key...", end=" ", flush=True)

@@ -22,7 +22,8 @@ from .poller import CONFIRMATIONS_SUBCATEGORY, JOBS_CATEGORY, apply_decision, tr
 log = logging.getLogger(__name__)
 
 
-def run_backfill(query: str, dry_run: bool = False, limit: int | None = None) -> None:
+def run_backfill(query: str, dry_run: bool = False, limit: int | None = None,
+                 use_cache: bool = True) -> None:
     config = cfg.load_config()
     client = llm.build_client(config)
     if not client.supports_batch:
@@ -45,6 +46,13 @@ def run_backfill(query: str, dry_run: bool = False, limit: int | None = None) ->
     schema = classifier.build_output_schema(categories)
     label_ids = gmail_client.ensure_labels(service, prompts.all_label_names(categories))
 
+    provider = config.get("provider", cfg.DEFAULT_PROVIDER)
+    model = config.get("model", cfg.DEFAULT_MODEL)
+    classify_fp = state.fingerprint(system_prompt, schema, provider, model)
+    extract_fp = state.fingerprint(
+        extraction_prompt, classifier.EXTRACTION_SCHEMA, provider, model
+    )
+
     log.info("Listing messages for query: %s", query)
     message_ids = gmail_client.list_message_ids(service, query, max_messages=limit)
     new_ids = [m for m in message_ids if not state.is_processed(conn, m)]
@@ -59,11 +67,29 @@ def run_backfill(query: str, dry_run: bool = False, limit: int | None = None) ->
         if i % 100 == 0 or i == len(new_ids):
             log.info("Fetched %d/%d messages from Gmail", i, len(new_ids))
 
-    classify_items = [
-        (mid, system_prompt, schema, classifier.email_content(emails[mid]))
-        for mid in new_ids
-    ]
-    results = client.batch_structured(classify_items, "classification")
+    # Replay anything a previous pass (typically --dry-run) already paid for,
+    # and only send the rest to the Batch API.
+    results: list[llm.BatchResult] = []
+    to_classify: list[str] = []
+    for mid in new_ids:
+        hit = state.cache_get(conn, mid, state.KIND_CLASSIFY, classify_fp) if use_cache else None
+        if hit is None:
+            to_classify.append(mid)
+        else:
+            results.append(llm.BatchResult(mid, True, hit))
+    if results:
+        log.info("Reusing %d cached classification(s); %d left to classify",
+                 len(results), len(to_classify))
+
+    if to_classify:
+        classify_items = [
+            (mid, system_prompt, schema, classifier.email_content(emails[mid]))
+            for mid in to_classify
+        ]
+        for r in client.batch_structured(classify_items, "classification"):
+            if r.ok and r.data is not None:
+                state.cache_put(conn, r.custom_id, state.KIND_CLASSIFY, classify_fp, r.data)
+            results.append(r)
 
     confirmations: list[str] = []
     stats: Counter = Counter()
@@ -91,26 +117,45 @@ def run_backfill(query: str, dry_run: bool = False, limit: int | None = None) ->
             confirmations.append(r.custom_id)
 
     log.info("Backfill summary: %s", dict(sorted(stats.items())))
+    if dry_run:
+        log.info("[dry-run] Classifications are cached. Re-run without --dry-run "
+                 "to apply them without paying for a second classification batch.")
 
     if not confirmations:
         return
     if dry_run:
+        # Extraction is skipped entirely on a dry run rather than cached: unlike
+        # classification, nothing has been billed for it yet, and previewing it
+        # would make the dry run cost more than it does today.
         log.info("[dry-run] %d confirmation(s) would be extracted to the tracker",
                  len(confirmations))
         return
 
-    extraction_items = [
-        (mid, extraction_prompt, classifier.EXTRACTION_SCHEMA,
-         classifier.email_content(emails[mid]))
-        for mid in confirmations
-    ]
     rows = 0
-    for r in client.batch_structured(extraction_items, "extraction"):
-        email = emails.get(r.custom_id)
-        if email is None or not r.ok or r.data is None:
-            log.warning("Extraction failed for %s; add it to the tracker manually",
-                        r.custom_id)
-            continue
-        tracker.append_row(tracker_csv, tracker_row(r.data, email))
-        rows += 1
+    to_extract: list[str] = []
+    for mid in confirmations:
+        hit = state.cache_get(conn, mid, state.KIND_EXTRACT, extract_fp) if use_cache else None
+        if hit is None:
+            to_extract.append(mid)
+        else:
+            tracker.append_row(tracker_csv, tracker_row(hit, emails[mid]))
+            rows += 1
+    if rows:
+        log.info("Reusing %d cached extraction(s); %d left to extract", rows, len(to_extract))
+
+    if to_extract:
+        extraction_items = [
+            (mid, extraction_prompt, classifier.EXTRACTION_SCHEMA,
+             classifier.email_content(emails[mid]))
+            for mid in to_extract
+        ]
+        for r in client.batch_structured(extraction_items, "extraction"):
+            email = emails.get(r.custom_id)
+            if email is None or not r.ok or r.data is None:
+                log.warning("Extraction failed for %s; add it to the tracker manually",
+                            r.custom_id)
+                continue
+            state.cache_put(conn, r.custom_id, state.KIND_EXTRACT, extract_fp, r.data)
+            tracker.append_row(tracker_csv, tracker_row(r.data, email))
+            rows += 1
     log.info("Tracker: %d application row(s) recorded in %s", rows, tracker_csv)
